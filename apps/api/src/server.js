@@ -46,7 +46,7 @@ if (process.env.APP_URL) {
 }
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+    if (!origin || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
       return callback(null, true);
     }
     return callback(new Error('CORS not allowed from this origin'));
@@ -922,38 +922,40 @@ if (fs.existsSync(WEB_DIST)) {
   });
 }
 
-// ---------- reminder scheduler (every 60s) ----------
-setInterval(() => {
-  try {
-    const now = new Date();
-    const rows = db.prepare(`SELECT t.* FROM tasks t JOIN task_statuses s ON s.id=t.status_id
-      WHERE s.is_closed=0 AND t.deleted_at IS NULL AND t.reminder_minutes IS NOT NULL`).all();
-    for (const t of rows) {
-      const due = new Date(t.due_at);
-      const remindAt = new Date(due.getTime() - t.reminder_minutes * 60000);
-      // initial reminder
-      if (t.reminder_sent===0 && remindAt <= now) {
-        notify(t.assignee_id, 'REMINDER', `Reminder: ${t.title}`, `Due ${t.due_at}`, t.id);
-        db.prepare(`UPDATE tasks SET reminder_sent=1, last_repeat_at=? WHERE id=?`).run(now.toISOString(), t.id);
-        continue;
-      }
-      // repeat reminders
-      if (t.repeat_minutes && t.reminder_sent===1) {
-        const last = t.last_repeat_at ? new Date(t.last_repeat_at) : remindAt;
-        const nextRepeat = new Date(last.getTime() + t.repeat_minutes*60000);
-        if (nextRepeat <= now && due > now) {
-          // still before due, or even overdue we keep nagging until closed — per spec keep nagging until done
-          notify(t.assignee_id, 'REMINDER', `⏰ Reminder: ${t.title}`, `Due ${t.due_at} — repeat every ${t.repeat_minutes}m`, t.id);
-          db.prepare(`UPDATE tasks SET last_repeat_at=? WHERE id=?`).run(now.toISOString(), t.id);
-        } else if (nextRepeat <= now && due <= now) {
-          // overdue repeat as well
-          notify(t.assignee_id, 'REMINDER', `⏰ Overdue: ${t.title}`, `Was due ${t.due_at} — repeat every ${t.repeat_minutes}m`, t.id);
-          db.prepare(`UPDATE tasks SET last_repeat_at=? WHERE id=?`).run(now.toISOString(), t.id);
+// ---------- reminder scheduler (every 60s, local server mode only) ----------
+if (!process.env.VERCEL) {
+  setInterval(() => {
+    try {
+      const now = new Date();
+      const rows = db.prepare(`SELECT t.* FROM tasks t JOIN task_statuses s ON s.id=t.status_id
+        WHERE s.is_closed=0 AND t.deleted_at IS NULL AND t.reminder_minutes IS NOT NULL`).all();
+      for (const t of rows) {
+        const due = new Date(t.due_at);
+        const remindAt = new Date(due.getTime() - t.reminder_minutes * 60000);
+        // initial reminder
+        if (t.reminder_sent===0 && remindAt <= now) {
+          notify(t.assignee_id, 'REMINDER', `Reminder: ${t.title}`, `Due ${t.due_at}`, t.id);
+          db.prepare(`UPDATE tasks SET reminder_sent=1, last_repeat_at=? WHERE id=?`).run(now.toISOString(), t.id);
+          continue;
+        }
+        // repeat reminders
+        if (t.repeat_minutes && t.reminder_sent===1) {
+          const last = t.last_repeat_at ? new Date(t.last_repeat_at) : remindAt;
+          const nextRepeat = new Date(last.getTime() + t.repeat_minutes*60000);
+          if (nextRepeat <= now && due > now) {
+            // still before due, or even overdue we keep nagging until closed — per spec keep nagging until done
+            notify(t.assignee_id, 'REMINDER', `⏰ Reminder: ${t.title}`, `Due ${t.due_at} — repeat every ${t.repeat_minutes}m`, t.id);
+            db.prepare(`UPDATE tasks SET last_repeat_at=? WHERE id=?`).run(now.toISOString(), t.id);
+          } else if (nextRepeat <= now && due <= now) {
+            // overdue repeat as well
+            notify(t.assignee_id, 'REMINDER', `⏰ Overdue: ${t.title}`, `Was due ${t.due_at} — repeat every ${t.repeat_minutes}m`, t.id);
+            db.prepare(`UPDATE tasks SET last_repeat_at=? WHERE id=?`).run(now.toISOString(), t.id);
+          }
         }
       }
-    }
-  } catch (e) { console.error('scheduler', e.message); }
-}, 60 * 1000);
+    } catch (e) { console.error('scheduler', e.message); }
+  }, 60 * 1000);
+}
 
 // Vercel: export app as serverless function, locally still listen
 if (!process.env.VERCEL) {

@@ -2,12 +2,23 @@
   "name": "grapteam",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "GraphTeam - premium team task management (teal minimal)",
   "scripts": {
-    "install:all": "cd apps/api && npm install && cd ../web && npm install",
+    "install:all": "npm install && cd apps/api && npm install && cd ../web && npm install",
     "dev:api": "cd apps/api && npm run dev",
     "dev:web": "cd apps/web && npm run dev",
     "build": "cd apps/web && npm run build",
     "start": "cd apps/api && npm start"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.10.0",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^11.1.0"
   }
 }

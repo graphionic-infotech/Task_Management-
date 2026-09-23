@@ -2,7 +2,7 @@
   "version": 2,
   "buildCommand": "cd apps/web && npm install && npm run build",
   "outputDirectory": "apps/web/dist",
-  "installCommand": "cd apps/api && npm install && cd ../web && npm install",
+  "installCommand": "npm install && cd apps/api && npm install && cd ../web && npm install",
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api" },
     { "source": "/assets/(.*)", "destination": "/assets/$1" },
