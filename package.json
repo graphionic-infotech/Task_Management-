@@ -1,0 +1,13 @@
+{
+  "name": "grapteam",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GraphTeam - premium team task management (teal minimal)",
+  "scripts": {
+    "install:all": "cd apps/api && npm install && cd ../web && npm install",
+    "dev:api": "cd apps/api && npm run dev",
+    "dev:web": "cd apps/web && npm run dev",
+    "build": "cd apps/web && npm run build",
+    "start": "cd apps/api && npm start"
+  }
+}
