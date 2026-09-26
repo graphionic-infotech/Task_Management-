@@ -38,7 +38,7 @@ export default function Login({ onLogin }) {
       });
       if (u && u.token) setToken(u.token);
       onLogin(u);
-      nav('/dashboard');
+      window.location.href = '/dashboard';
     } catch (er) {
       setErr(er.message || 'Invalid name or password');
     } finally {

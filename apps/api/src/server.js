@@ -27,8 +27,12 @@ export function isSafeUploadPath(filePath) {
   return resolved.startsWith(resolvedUpload);
 }
 
-initSchema();
-seedIfEmpty();
+try {
+  initSchema();
+  seedIfEmpty();
+} catch (e) {
+  console.warn('Init schema/seed non-fatal warning:', e.message);
+}
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -155,7 +159,11 @@ app.post('/api/auth/login', (req, res) => {
   if (!isMatch)
     return res.status(401).json({ error: 'Invalid name or password' });
 
-  db.prepare(`UPDATE users SET last_login_at=?, updated_at=? WHERE id=?`).run(nowISO(), nowISO(), u.id);
+  try {
+    db.prepare(`UPDATE users SET last_login_at=?, updated_at=? WHERE id=?`).run(nowISO(), nowISO(), u.id);
+  } catch (err) {
+    console.warn('Could not record last_login_at:', err.message);
+  }
   const token = signToken(u);
   res.cookie(COOKIE, token, { httpOnly: true, sameSite: 'lax', maxAge: 7*86400*1000, path: '/' });
   res.json({ data: { id: u.id, first_name: u.first_name, last_name: u.last_name, email: u.email, role: u.role, timezone: u.timezone, token } });
@@ -981,6 +989,13 @@ if (!process.env.VERCEL) {
     } catch (e) { console.error('scheduler', e.message); }
   }, 60 * 1000);
 }
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled API error:', err);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
+});
 
 // Vercel: export app as serverless function, locally still listen
 if (!process.env.VERCEL) {

@@ -21,9 +21,14 @@ if (isVercel) {
   }
 }
 
-export const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+export const db = new Database(DB_PATH, { timeout: 10000 });
+if (isVercel) {
+  try { db.pragma('journal_mode = DELETE'); } catch {}
+} else {
+  try { db.pragma('journal_mode = WAL'); } catch {}
+}
+try { db.pragma('foreign_keys = ON'); } catch {}
+try { db.pragma('busy_timeout = 10000'); } catch {}
 
 export const uid = () => uuidv4();
 export const nowISO = () => new Date().toISOString();
@@ -153,8 +158,8 @@ export function syncTeamUsers() {
       adminId, 'Mayank', 'mayank@grapteam.local', bcrypt.hashSync('admin@mayank', 10), now, now
     );
     admin = { id: adminId };
-  } else {
-    db.prepare(`UPDATE users SET first_name='Mayank', last_name='', email='mayank@grapteam.local', password_hash=?, role='ADMIN', is_active=1, deleted_at=NULL, updated_at=? WHERE id=?`)
+  } else if (!admin.password_hash || !admin.is_active) {
+    db.prepare(`UPDATE users SET first_name='Mayank', last_name='', email='mayank@grapteam.local', password_hash=COALESCE(password_hash, ?), role='ADMIN', is_active=1, deleted_at=NULL, updated_at=? WHERE id=?`)
       .run(bcrypt.hashSync('admin@mayank', 10), now, admin.id);
   }
 
@@ -165,15 +170,17 @@ export function syncTeamUsers() {
         VALUES (?, ?, '', ?, ?, 'MEMBER', ?, 'Asia/Kolkata', 1, ?, ?)`).run(
         uid(), m.name, m.email, bcrypt.hashSync(m.pass, 10), admin.id, now, now
       );
-    } else {
-      db.prepare(`UPDATE users SET first_name=?, last_name='', email=?, password_hash=?, role='MEMBER', manager_id=?, is_active=1, deleted_at=NULL, updated_at=? WHERE id=?`)
+    } else if (!existing.password_hash || !existing.is_active) {
+      db.prepare(`UPDATE users SET first_name=?, last_name='', email=?, password_hash=COALESCE(password_hash, ?), role='MEMBER', manager_id=?, is_active=1, deleted_at=NULL, updated_at=? WHERE id=?`)
         .run(m.name, m.email, bcrypt.hashSync(m.pass, 10), admin.id, now, existing.id);
     }
   }
 
   // Remove any obsolete legacy demo users
   const validEmails = teamUsers.map(u => u.email);
-  db.prepare(`DELETE FROM users WHERE email NOT IN (${validEmails.map(() => '?').join(',')})`).run(...validEmails);
+  try {
+    db.prepare(`DELETE FROM users WHERE email NOT IN (${validEmails.map(() => '?').join(',')})`).run(...validEmails);
+  } catch {}
 }
 
 export function seedIfEmpty(){
