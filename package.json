@@ -5,10 +5,11 @@
   "type": "module",
   "description": "GraphTeam - premium team task management (teal minimal)",
   "scripts": {
+    "postinstall": "cd apps/api && npm install && cd ../web && npm install",
     "install:all": "npm install && cd apps/api && npm install && cd ../web && npm install",
     "dev:api": "cd apps/api && npm run dev",
     "dev:web": "cd apps/web && npm run dev",
-    "build": "cd apps/web && npm run build",
+    "build": "cd apps/web && npm install && npm run build",
     "start": "cd apps/api && npm start"
   },
   "dependencies": {
