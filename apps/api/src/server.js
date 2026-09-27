@@ -901,26 +901,49 @@ app.delete('/api/projects/:id', auth, need('ADMIN','MANAGER'), (req, res) => {
 
 // ---------- dashboard / search / reports ----------
 app.get('/api/dashboard', auth, (req, res) => {
-  const v = visibleWhere(req.user);
-  const now = nowISO();
-  const dayStart = new Date(); dayStart.setHours(0,0,0,0);
-  const dayEnd = new Date(); dayEnd.setHours(23,59,59,999);
-  const q = (extra, ...p) => db.prepare(`SELECT COUNT(*) c ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra}`).get(...v.params, ...p).c;
-  const list = (extra, order, ...p) => db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra} ORDER BY ${order} LIMIT 10`).all(...v.params, ...p);
-  res.json({ data: {
-    counts: {
-      dueToday: q(`t.due_at>=? AND t.due_at<=?`, dayStart.toISOString(), dayEnd.toISOString()),
-      overdue: q(`t.due_at<? AND s2.is_closed=0`, now),
-      upcoming: q(`t.due_at>? AND s2.is_closed=0`, now),
-      completedToday: q(`t.completed_at>=? AND t.completed_at<=?`, dayStart.toISOString(), dayEnd.toISOString()),
-      high: q(`t.priority IN ('HIGH','URGENT') AND s2.is_closed=0`),
-      myOpen: db.prepare(`SELECT COUNT(*) c FROM tasks t JOIN task_statuses s ON s.id=t.status_id WHERE t.assignee_id=? AND s.is_closed=0 AND t.deleted_at IS NULL`).get(req.user.id).c,
-    },
-    dueToday: list(`t.due_at>=? AND t.due_at<=?`, 't.due_at ASC', dayStart.toISOString(), dayEnd.toISOString()),
-    overdue: list(`t.due_at<? AND s2.is_closed=0`, 't.due_at ASC', now),
-    upcoming: list(`t.due_at>? AND s2.is_closed=0`, 't.due_at ASC', now),
-    unread: db.prepare(`SELECT COUNT(*) c FROM notifications WHERE user_id=? AND is_read=0`).get(req.user.id).c,
-  }});
+  try {
+    const v = visibleWhere(req.user);
+    const now = nowISO();
+    const dayStart = new Date(); dayStart.setHours(0,0,0,0);
+    const dayEnd = new Date(); dayEnd.setHours(23,59,59,999);
+    const q = (extra, ...p) => {
+      try {
+        return db.prepare(`SELECT COUNT(*) c ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra}`).get(...v.params, ...p)?.c || 0;
+      } catch { return 0; }
+    };
+    const list = (extra, order, ...p) => {
+      try {
+        return db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra} ORDER BY ${order} LIMIT 10`).all(...v.params, ...p) || [];
+      } catch { return []; }
+    };
+    const unread = (() => {
+      try { return db.prepare(`SELECT COUNT(*) c FROM notifications WHERE user_id=? AND is_read=0`).get(req.user.id)?.c || 0; } catch { return 0; }
+    })();
+    const myOpen = (() => {
+      try { return db.prepare(`SELECT COUNT(*) c FROM tasks t JOIN task_statuses s ON s.id=t.status_id WHERE t.assignee_id=? AND s.is_closed=0 AND t.deleted_at IS NULL`).get(req.user.id)?.c || 0; } catch { return 0; }
+    })();
+
+    res.json({ data: {
+      counts: {
+        dueToday: q(`t.due_at>=? AND t.due_at<=?`, dayStart.toISOString(), dayEnd.toISOString()),
+        overdue: q(`t.due_at<? AND s2.is_closed=0`, now),
+        upcoming: q(`t.due_at>? AND s2.is_closed=0`, now),
+        completedToday: q(`t.completed_at>=? AND t.completed_at<=?`, dayStart.toISOString(), dayEnd.toISOString()),
+        high: q(`t.priority IN ('HIGH','URGENT') AND s2.is_closed=0`),
+        myOpen,
+      },
+      dueToday: list(`t.due_at>=? AND t.due_at<=?`, 't.due_at ASC', dayStart.toISOString(), dayEnd.toISOString()),
+      overdue: list(`t.due_at<? AND s2.is_closed=0`, 't.due_at ASC', now),
+      upcoming: list(`t.due_at>? AND s2.is_closed=0`, 't.due_at ASC', now),
+      unread,
+    }});
+  } catch (err) {
+    console.error('Dashboard error:', err);
+    res.json({ data: {
+      counts: { dueToday: 0, overdue: 0, upcoming: 0, completedToday: 0, high: 0, myOpen: 0 },
+      dueToday: [], overdue: [], upcoming: [], unread: 0
+    }});
+  }
 });
 
 app.get('/api/search', auth, (req, res) => {
