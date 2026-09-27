@@ -19,14 +19,24 @@ async function getApp() {
 export default async function handler(req, res) {
   try {
     const app = await getApp();
-    return app(req, res);
+    return await new Promise((resolve, reject) => {
+      res.once('finish', resolve);
+      res.once('close', resolve);
+      res.once('error', reject);
+      try {
+        app(req, res);
+      } catch (err) {
+        reject(err);
+      }
+    });
   } catch (err) {
     console.error('Serverless fatal invocation error:', err);
-    res.status(500).json({
-      error: 'SERVERLESS_IMPORT_ERROR',
-      message: err.message,
-      code: err.code,
-      stack: err.stack
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'SERVERLESS_INVOCATION_ERROR',
+        message: err.message || String(err),
+        code: err.code
+      });
+    }
   }
 }

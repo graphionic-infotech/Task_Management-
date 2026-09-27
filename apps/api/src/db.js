@@ -22,10 +22,10 @@ if (isVercel) {
 }
 
 export const db = new Database(DB_PATH, { timeout: 10000 });
-if (isVercel) {
+try {
+  db.pragma('journal_mode = WAL');
+} catch {
   try { db.pragma('journal_mode = DELETE'); } catch {}
-} else {
-  try { db.pragma('journal_mode = WAL'); } catch {}
 }
 try { db.pragma('foreign_keys = ON'); } catch {}
 try { db.pragma('busy_timeout = 10000'); } catch {}
@@ -167,21 +167,25 @@ export const SEED_TYPES = [
 export function syncTeamUsers() {
   const now = nowISO();
   for (const u of SEED_USERS) {
-    const existing = db.prepare(`SELECT * FROM users WHERE id=? OR email=? OR LOWER(first_name)=?`).get(u.id, u.email, u.first_name.toLowerCase());
-    if (!existing) {
-      db.prepare(`INSERT INTO users (id, first_name, last_name, email, password_hash, role, manager_id, timezone, is_active, created_at, updated_at)
-        VALUES (?, ?, '', ?, ?, ?, ?, 'Asia/Kolkata', 1, ?, ?)`).run(
-        u.id, u.first_name, u.email, u.password_hash, u.role, u.manager_id, now, now
-      );
-    } else {
-      db.prepare(`UPDATE users SET id=?, first_name=?, email=?, password_hash=?, role=?, is_active=1, deleted_at=NULL, updated_at=? WHERE id=? OR email=?`)
-        .run(u.id, u.first_name, u.email, u.password_hash, u.role, now, existing.id, u.email);
+    try {
+      const existing = db.prepare(`SELECT * FROM users WHERE id=? OR email=? OR LOWER(first_name)=?`).get(u.id, u.email, u.first_name.toLowerCase());
+      if (!existing) {
+        db.prepare(`INSERT INTO users (id, first_name, last_name, email, password_hash, role, manager_id, timezone, is_active, created_at, updated_at)
+          VALUES (?, ?, '', ?, ?, ?, ?, 'Asia/Kolkata', 1, ?, ?)`).run(
+          u.id, u.first_name, u.email, u.password_hash, u.role, u.manager_id, now, now
+        );
+      } else {
+        db.prepare(`UPDATE users SET first_name=?, email=?, password_hash=?, role=?, is_active=1, deleted_at=NULL, updated_at=? WHERE id=?`)
+          .run(u.first_name, u.email, u.password_hash, u.role, now, existing.id);
+      }
+    } catch (e) {
+      console.warn('syncTeamUser warning for', u.id, e.message);
     }
   }
 
   // Remove any obsolete legacy demo users
-  const validEmails = SEED_USERS.map(u => u.email);
   try {
+    const validEmails = SEED_USERS.map(u => u.email);
     db.prepare(`DELETE FROM users WHERE email NOT IN (${validEmails.map(() => '?').join(',')})`).run(...validEmails);
   } catch {}
 }

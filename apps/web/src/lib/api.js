@@ -4,19 +4,37 @@
 export function getToken() { try { return localStorage.getItem('gt_token'); } catch { return null; } }
 export function setToken(t) { try { t ? localStorage.setItem('gt_token', t) : localStorage.removeItem('gt_token'); } catch {} }
 
-export async function api(path, opts = {}) {
+export async function api(path, opts = {}, retries = 1) {
   const headers = { ...(opts.headers || {}) };
   if (opts.body !== undefined && !(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
   const tok = getToken();
   if (tok) headers['Authorization'] = 'Bearer ' + tok;
-  const res = await fetch(path, {
-    credentials: 'include',
-    ...opts,
-    headers,
-    body: opts.body && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body,
-  });
+
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: 'include',
+      ...opts,
+      headers,
+      body: opts.body && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body,
+    });
+  } catch (networkErr) {
+    if (retries > 0) {
+      await new Promise(r => setTimeout(r, 350));
+      return api(path, opts, retries - 1);
+    }
+    throw networkErr;
+  }
+
   let data = null;
   try { data = await res.json(); } catch {}
+
+  // Auto-retry transient 500s or cold-start hiccups
+  if (!res.ok && res.status >= 500 && retries > 0) {
+    await new Promise(r => setTimeout(r, 350));
+    return api(path, opts, retries - 1);
+  }
+
   if (res.status === 401 && path !== '/api/auth/login') {
     setToken(null);
     if (!window.location.pathname.startsWith('/login')) window.location.href = '/login';
