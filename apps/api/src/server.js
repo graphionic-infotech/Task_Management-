@@ -7,7 +7,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { db, initSchema, seedIfEmpty, uid, notify, logActivity } from './db.js';
+import { db, initSchema, seedIfEmpty, uid, notify, logActivity, SEED_USERS } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isVercel = !!process.env.VERCEL;
@@ -66,14 +66,34 @@ if (fs.existsSync(WEB_DIST)) {
 
 // ---------- auth ----------
 function signToken(user) {
-  return jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ id: user.id, role: user.role, name: user.first_name, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 }
+
+function safeBcryptCompare(pass, hash) {
+  if (!pass || !hash || typeof hash !== 'string') return false;
+  try {
+    return bcrypt.compareSync(pass, hash);
+  } catch {
+    return false;
+  }
+}
+
 function auth(req, res, next) {
   const t = req.cookies[COOKIE] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || req.query.token;
   if (!t) return res.status(401).json({ error: 'Not logged in' });
   try {
     const p = jwt.verify(t, JWT_SECRET);
-    const u = db.prepare(`SELECT id, first_name, last_name, email, role, manager_id, timezone FROM users WHERE id=? AND is_active=1 AND deleted_at IS NULL`).get(p.id);
+    let u = db.prepare(`SELECT id, first_name, last_name, email, role, manager_id, timezone FROM users WHERE id=? AND is_active=1 AND deleted_at IS NULL`).get(p.id);
+    if (!u) {
+      try { seedIfEmpty(); } catch {}
+      u = db.prepare(`SELECT id, first_name, last_name, email, role, manager_id, timezone FROM users WHERE id=? AND is_active=1 AND deleted_at IS NULL`).get(p.id);
+    }
+    if (!u) {
+      const su = SEED_USERS.find(s => s.id === p.id || s.email === p.email);
+      if (su) {
+        u = { id: su.id, first_name: su.first_name, last_name: su.last_name || '', email: su.email, role: su.role, manager_id: su.manager_id, timezone: 'Asia/Kolkata' };
+      }
+    }
     if (!u) return res.status(401).json({ error: 'Invalid session' });
     req.user = u;
     next();
@@ -138,35 +158,49 @@ function nextOccurrence(dueISO, recurrence) {
 
 // ---------- auth routes ----------
 app.post('/api/auth/login', (req, res) => {
-  const { email, username, name, password } = req.body || {};
-  const query = (username || name || email || '').trim().toLowerCase();
-  if (!query || !password) return res.status(400).json({ error: 'Name and password required' });
-  const fullEmail = query.includes('@') ? query : `${query}@grapteam.local`;
-  const u = db.prepare(`SELECT * FROM users WHERE (email=? OR LOWER(first_name)=?) AND deleted_at IS NULL`).get(fullEmail, query);
-  if (!u || !u.is_active)
-    return res.status(401).json({ error: 'Invalid name or password' });
-
-  const inputPass = String(password || '').trim();
-  const userNameLower = (u.first_name || '').toLowerCase();
-  const isMatch = bcrypt.compareSync(inputPass, u.password_hash)
-    || inputPass.toLowerCase() === userNameLower
-    || inputPass.toLowerCase() === `admin@${userNameLower}`
-    || inputPass.toLowerCase() === `team@${userNameLower}`
-    || inputPass === '123456'
-    || inputPass.toLowerCase() === 'password'
-    || inputPass.toLowerCase() === 'admin';
-
-  if (!isMatch)
-    return res.status(401).json({ error: 'Invalid name or password' });
-
   try {
-    db.prepare(`UPDATE users SET last_login_at=?, updated_at=? WHERE id=?`).run(nowISO(), nowISO(), u.id);
+    const { email, username, name, password } = req.body || {};
+    const query = (username || name || email || '').trim().toLowerCase();
+    if (!query || !password) return res.status(400).json({ error: 'Name and password required' });
+    const fullEmail = query.includes('@') ? query : `${query}@grapteam.local`;
+    
+    let u = db.prepare(`SELECT * FROM users WHERE (email=? OR LOWER(first_name)=?) AND deleted_at IS NULL`).get(fullEmail, query);
+    if (!u) {
+      try { seedIfEmpty(); } catch {}
+      u = db.prepare(`SELECT * FROM users WHERE (email=? OR LOWER(first_name)=?) AND deleted_at IS NULL`).get(fullEmail, query);
+    }
+    if (!u) {
+      const matchedSeed = SEED_USERS.find(su => su.email.toLowerCase() === fullEmail || su.first_name.toLowerCase() === query);
+      if (matchedSeed) u = matchedSeed;
+    }
+    if (!u || u.is_active === 0)
+      return res.status(401).json({ error: 'Invalid name or password' });
+
+    const inputPass = String(password || '').trim();
+    const userNameLower = (u.first_name || '').toLowerCase();
+    const isMatch = safeBcryptCompare(inputPass, u.password_hash)
+      || inputPass.toLowerCase() === userNameLower
+      || inputPass.toLowerCase() === `admin@${userNameLower}`
+      || inputPass.toLowerCase() === `team@${userNameLower}`
+      || inputPass === '123456'
+      || inputPass.toLowerCase() === 'password'
+      || inputPass.toLowerCase() === 'admin';
+
+    if (!isMatch)
+      return res.status(401).json({ error: 'Invalid name or password' });
+
+    try {
+      db.prepare(`UPDATE users SET last_login_at=?, updated_at=? WHERE id=?`).run(nowISO(), nowISO(), u.id);
+    } catch (err) {
+      console.warn('Could not record last_login_at:', err.message);
+    }
+    const token = signToken(u);
+    res.cookie(COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: isVercel, maxAge: 7*86400*1000, path: '/' });
+    res.json({ data: { id: u.id, first_name: u.first_name, last_name: u.last_name || '', email: u.email, role: u.role, timezone: u.timezone || 'Asia/Kolkata', token } });
   } catch (err) {
-    console.warn('Could not record last_login_at:', err.message);
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Login processing failed: ' + err.message });
   }
-  const token = signToken(u);
-  res.cookie(COOKIE, token, { httpOnly: true, sameSite: 'lax', maxAge: 7*86400*1000, path: '/' });
-  res.json({ data: { id: u.id, first_name: u.first_name, last_name: u.last_name, email: u.email, role: u.role, timezone: u.timezone, token } });
 });
 app.post('/api/auth/logout', (req, res) => { res.clearCookie(COOKIE, { path: '/' }); res.json({ data: true }); });
 app.get('/api/auth/me', (req, res) => {
@@ -174,9 +208,18 @@ app.get('/api/auth/me', (req, res) => {
   if (!t) return res.json({ data: null });
   try {
     const p = jwt.verify(t, JWT_SECRET);
-    const u = db.prepare(`SELECT id, first_name, last_name, email, role, manager_id, timezone FROM users WHERE id=? AND is_active=1 AND deleted_at IS NULL`).get(p.id);
-    if (!u) return res.json({ data: null });
-    return res.json({ data: u });
+    let u = db.prepare(`SELECT id, first_name, last_name, email, role, manager_id, timezone FROM users WHERE id=? AND is_active=1 AND deleted_at IS NULL`).get(p.id);
+    if (!u) {
+      try { seedIfEmpty(); } catch {}
+      u = db.prepare(`SELECT id, first_name, last_name, email, role, manager_id, timezone FROM users WHERE id=? AND is_active=1 AND deleted_at IS NULL`).get(p.id);
+    }
+    if (!u) {
+      const su = SEED_USERS.find(s => s.id === p.id || s.email === p.email);
+      if (su) {
+        u = { id: su.id, first_name: su.first_name, last_name: su.last_name || '', email: su.email, role: su.role, manager_id: su.manager_id, timezone: 'Asia/Kolkata' };
+      }
+    }
+    return res.json({ data: u || null });
   } catch {
     return res.json({ data: null });
   }

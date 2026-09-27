@@ -17,7 +17,7 @@ export async function api(path, opts = {}) {
   });
   let data = null;
   try { data = await res.json(); } catch {}
-  if (res.status === 401) {
+  if (res.status === 401 && path !== '/api/auth/login') {
     setToken(null);
     if (!window.location.pathname.startsWith('/login')) window.location.href = '/login';
   }

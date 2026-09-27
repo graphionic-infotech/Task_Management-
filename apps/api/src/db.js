@@ -140,75 +140,68 @@ export function initSchema(){
 
 }
 
+export const SEED_USERS = [
+  { id: 'usr_mayank', first_name: 'Mayank', last_name: '', email: 'mayank@grapteam.local', password_hash: '$2a$10$1px5BuEdoXNvcRwuRQOZK.37Igid2i7O0g0beo2AZwbgVb9cPSKWK', role: 'ADMIN', manager_id: null },
+  { id: 'usr_rudra', first_name: 'Rudra', last_name: '', email: 'rudra@grapteam.local', password_hash: '$2a$10$HPRfgjXunnVi/b8Cdrqto.3Ewmwh1htJGWmjklc1wIKkeZUePkobO', role: 'MEMBER', manager_id: 'usr_mayank' },
+  { id: 'usr_lay', first_name: 'Lay', last_name: '', email: 'lay@grapteam.local', password_hash: '$2a$10$cJoheniE70wVyl5rZ6sPku.iMiWVjPK8odWGEVoFCU5qYCvzjwo1e', role: 'MEMBER', manager_id: 'usr_mayank' },
+  { id: 'usr_vedant', first_name: 'Vedant', last_name: '', email: 'vedant@grapteam.local', password_hash: '$2a$10$0joj.sFWv/vm0UiJAHe9tucYneFEVZEurWkm6qJisWzlhddP52DUK', role: 'MEMBER', manager_id: 'usr_mayank' },
+  { id: 'usr_bhumi', first_name: 'Bhumi', last_name: '', email: 'bhumi@grapteam.local', password_hash: '$2a$10$IU3VzhllWpHKMaAPbpbJHOPN/I3mehkMq1QTPlJGjXh9hM0mU6BwW', role: 'MEMBER', manager_id: 'usr_mayank' },
+];
+
+export const SEED_STATUSES = [
+  ['stat_not_started', 'Not Started', '#6366f1', 1, 0],
+  ['stat_in_progress', 'In Progress', '#0ea5e9', 2, 0],
+  ['stat_waiting', 'Waiting', '#f59e0b', 3, 0],
+  ['stat_completed', 'Completed', '#10b981', 4, 1],
+  ['stat_cancelled', 'Cancelled', '#64748b', 5, 1],
+];
+
+export const SEED_TYPES = [
+  ['type_task', 'Task', '#0d9488'],
+  ['type_meeting', 'Meeting', '#0ea5e9'],
+  ['type_call', 'Call', '#3b82f6'],
+  ['type_review', 'Review', '#f59e0b'],
+  ['type_general', 'General', '#64748b']
+];
+
 export function syncTeamUsers() {
   const now = nowISO();
-  const teamUsers = [
-    { name: 'Mayank', email: 'mayank@grapteam.local', pass: 'admin@mayank', role: 'ADMIN' },
-    { name: 'Rudra', email: 'rudra@grapteam.local', pass: 'team@rudra', role: 'MEMBER' },
-    { name: 'Lay', email: 'lay@grapteam.local', pass: 'team@lay', role: 'MEMBER' },
-    { name: 'Vedant', email: 'vedant@grapteam.local', pass: 'team@vedant', role: 'MEMBER' },
-    { name: 'Bhumi', email: 'bhumi@grapteam.local', pass: 'team@bhumi', role: 'MEMBER' }
-  ];
-
-  let admin = db.prepare(`SELECT * FROM users WHERE email='mayank@grapteam.local' OR LOWER(first_name)='mayank'`).get();
-  if (!admin) {
-    const adminId = uid();
-    db.prepare(`INSERT INTO users (id, first_name, last_name, email, password_hash, role, manager_id, timezone, is_active, created_at, updated_at)
-      VALUES (?, ?, '', ?, ?, 'ADMIN', NULL, 'Asia/Kolkata', 1, ?, ?)`).run(
-      adminId, 'Mayank', 'mayank@grapteam.local', bcrypt.hashSync('admin@mayank', 10), now, now
-    );
-    admin = { id: adminId };
-  } else if (!admin.password_hash || !admin.is_active) {
-    db.prepare(`UPDATE users SET first_name='Mayank', last_name='', email='mayank@grapteam.local', password_hash=COALESCE(password_hash, ?), role='ADMIN', is_active=1, deleted_at=NULL, updated_at=? WHERE id=?`)
-      .run(bcrypt.hashSync('admin@mayank', 10), now, admin.id);
-  }
-
-  for (const m of teamUsers.slice(1)) {
-    const existing = db.prepare(`SELECT * FROM users WHERE email=? OR LOWER(first_name)=?`).get(m.email, m.name.toLowerCase());
+  for (const u of SEED_USERS) {
+    const existing = db.prepare(`SELECT * FROM users WHERE id=? OR email=? OR LOWER(first_name)=?`).get(u.id, u.email, u.first_name.toLowerCase());
     if (!existing) {
       db.prepare(`INSERT INTO users (id, first_name, last_name, email, password_hash, role, manager_id, timezone, is_active, created_at, updated_at)
-        VALUES (?, ?, '', ?, ?, 'MEMBER', ?, 'Asia/Kolkata', 1, ?, ?)`).run(
-        uid(), m.name, m.email, bcrypt.hashSync(m.pass, 10), admin.id, now, now
+        VALUES (?, ?, '', ?, ?, ?, ?, 'Asia/Kolkata', 1, ?, ?)`).run(
+        u.id, u.first_name, u.email, u.password_hash, u.role, u.manager_id, now, now
       );
-    } else if (!existing.password_hash || !existing.is_active) {
-      db.prepare(`UPDATE users SET first_name=?, last_name='', email=?, password_hash=COALESCE(password_hash, ?), role='MEMBER', manager_id=?, is_active=1, deleted_at=NULL, updated_at=? WHERE id=?`)
-        .run(m.name, m.email, bcrypt.hashSync(m.pass, 10), admin.id, now, existing.id);
+    } else {
+      db.prepare(`UPDATE users SET id=?, first_name=?, email=?, password_hash=?, role=?, is_active=1, deleted_at=NULL, updated_at=? WHERE id=? OR email=?`)
+        .run(u.id, u.first_name, u.email, u.password_hash, u.role, now, existing.id, u.email);
     }
   }
 
   // Remove any obsolete legacy demo users
-  const validEmails = teamUsers.map(u => u.email);
+  const validEmails = SEED_USERS.map(u => u.email);
   try {
     db.prepare(`DELETE FROM users WHERE email NOT IN (${validEmails.map(() => '?').join(',')})`).run(...validEmails);
   } catch {}
 }
 
 export function seedIfEmpty(){
-  const statuses = [
-    [uid(),'Not Started','#6366f1',1,0],
-    [uid(),'In Progress','#0ea5e9',2,0],
-    [uid(),'Waiting','#f59e0b',3,0],
-    [uid(),'Completed','#10b981',4,1],
-    [uid(),'Cancelled','#64748b',5,1],
-  ];
-  const sc = db.prepare(`SELECT COUNT(*) c FROM task_statuses`).get().c;
-  if (sc === 0) {
-    for (const [id, name, color, ord, closed] of statuses) {
+  for (const [id, name, color, ord, closed] of SEED_STATUSES) {
+    const s = db.prepare(`SELECT id FROM task_statuses WHERE name=? OR id=?`).get(name, id);
+    if (!s) {
       db.prepare(`INSERT INTO task_statuses (id, name, color, sort_order, is_closed) VALUES (?,?,?,?,?)`).run(id, name, color, ord, closed);
+    } else if (s.id !== id) {
+      db.prepare(`UPDATE task_statuses SET id=? WHERE id=?`).run(id, s.id);
     }
   }
 
-  const types = [
-    [uid(),'Task','#0d9488'],
-    [uid(),'Meeting','#0ea5e9'],
-    [uid(),'Call','#3b82f6'],
-    [uid(),'Review','#f59e0b'],
-    [uid(),'General','#64748b']
-  ];
-  const tc = db.prepare(`SELECT COUNT(*) c FROM task_types`).get().c;
-  if (tc === 0) {
-    for (const [id, name, color] of types) {
+  for (const [id, name, color] of SEED_TYPES) {
+    const t = db.prepare(`SELECT id FROM task_types WHERE name=? OR id=?`).get(name, id);
+    if (!t) {
       db.prepare(`INSERT INTO task_types (id, name, color) VALUES (?,?,?)`).run(id, name, color);
+    } else if (t.id !== id) {
+      db.prepare(`UPDATE task_types SET id=? WHERE id=?`).run(id, t.id);
     }
   }
 
