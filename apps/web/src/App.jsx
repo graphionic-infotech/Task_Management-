@@ -16,14 +16,14 @@ function MyTasks({ meta, onOpen, refreshKey, user }) {
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     if (!user?.id) return;
-    setLoading(true);
+    if (rows.length === 0) setLoading(true);
     const p = new URLSearchParams({ assignee: user.id });
     if (tab === 'today') p.set('view', 'today');
     else if (tab === 'overdue') p.set('view', 'overdue');
     else if (tab === 'upcoming') p.set('view', 'upcoming');
     else if (tab === 'completed') p.set('view', 'completed');
     else p.set('view', 'open');
-    api('/api/tasks?' + p.toString()).then(setRows).catch(()=>{}).finally(()=>setLoading(false));
+    api('/api/tasks?' + p.toString()).then(r => setRows(r || [])).catch(()=>{}).finally(()=>setLoading(false));
   }, [tab, refreshKey, user?.id]);
   return (
     <div>
@@ -128,12 +128,14 @@ export default function App() {
 
   const bump = () => { setRefreshKey((k) => k + 1); loadLookups(); };
 
-  // Auto-fetch new tasks and updates every 6 seconds
+  // Auto-fetch new tasks and updates every 15 seconds (when tab is visible)
   useEffect(() => {
     if (!user) return;
     const timer = setInterval(() => {
-      setRefreshKey((k) => k + 1);
-    }, 6000);
+      if (document.visibilityState === 'visible') {
+        setRefreshKey((k) => k + 1);
+      }
+    }, 15000);
     return () => clearInterval(timer);
   }, [user]);
 

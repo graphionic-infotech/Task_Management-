@@ -99,14 +99,24 @@ export default function Dashboard({ onOpen }) {
   const [err, setErr] = useState('');
   const nav = useNavigate();
 
-  const load = () => {
-    setErr('');
-    api('/api/dashboard').then(setD).catch(e => setErr(e.message || 'Failed to load'));
+  const load = (silent = false) => {
+    if (!silent) setErr('');
+    api('/api/dashboard')
+      .then(data => {
+        if (data) setD(data);
+      })
+      .catch(e => {
+        if (!d) setErr(e.message || 'Failed to load dashboard');
+      });
   };
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 8000); // auto-refresh dashboard every 8 seconds
+    load(false);
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        load(true);
+      }
+    }, 15000); // auto-refresh dashboard every 15 seconds silently
     return () => clearInterval(t);
   }, []);
 

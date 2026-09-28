@@ -183,11 +183,84 @@ export function syncTeamUsers() {
     }
   }
 
-  // Remove any obsolete legacy demo users
+  // Only remove obsolete legacy demo accounts, never real user-created accounts!
   try {
-    const validEmails = SEED_USERS.map(u => u.email);
-    db.prepare(`DELETE FROM users WHERE email NOT IN (${validEmails.map(() => '?').join(',')})`).run(...validEmails);
+    db.prepare(`DELETE FROM users WHERE email IN ('admin@grapteam.local', 'rahul@grapteam.local', 'priya@grapteam.local', 'vikram@grapteam.local')`).run();
   } catch {}
+}
+
+export function saveTasksSnapshot() {
+  try {
+    const tasks = db.prepare(`SELECT * FROM tasks WHERE deleted_at IS NULL`).all();
+    const subtasks = db.prepare(`SELECT * FROM subtasks`).all();
+    const data = JSON.stringify({ tasks, subtasks }, null, 2);
+
+    const storePath = path.join(DATA_DIR, 'tasks_store.json');
+    fs.writeFileSync(storePath, data, 'utf8');
+
+    // Also update repo tasks_seed.json if writable (local dev)
+    const seedPath = path.join(__dirname, '../../../data/tasks_seed.json');
+    if (fs.existsSync(path.dirname(seedPath))) {
+      try { fs.writeFileSync(seedPath, data, 'utf8'); } catch {}
+    }
+  } catch (e) {
+    console.warn('saveTasksSnapshot error:', e.message);
+  }
+}
+
+export function restoreTasksFromSnapshot() {
+  try {
+    const taskCount = db.prepare(`SELECT COUNT(*) c FROM tasks`).get()?.c || 0;
+    if (taskCount > 0) return; // DB already has tasks
+
+    let data = null;
+    const storePath = path.join(DATA_DIR, 'tasks_store.json');
+    const seedPath = path.join(__dirname, '../../../data/tasks_seed.json');
+
+    if (fs.existsSync(storePath)) {
+      try { data = JSON.parse(fs.readFileSync(storePath, 'utf8')); } catch {}
+    }
+    if (!data && fs.existsSync(seedPath)) {
+      try { data = JSON.parse(fs.readFileSync(seedPath, 'utf8')); } catch {}
+    }
+
+    if (!data || !Array.isArray(data.tasks)) return;
+
+    const insertTask = db.prepare(`INSERT OR IGNORE INTO tasks 
+      (id,title,description,type_id,status_id,priority,assignee_id,created_by_id,parent_task_id,contact_id,company_id,project_id,start_at,due_at,estimated_minutes,reminder_minutes,repeat_minutes,recurrence,tags,notes,completed_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+
+    for (const t of data.tasks) {
+      try {
+        insertTask.run(
+          t.id, t.title, t.description || '', t.type_id || null, t.status_id, t.priority || 'MEDIUM',
+          t.assignee_id || null, t.created_by_id || null, t.parent_task_id || null, t.contact_id || null,
+          t.company_id || null, t.project_id || null, t.start_at || null, t.due_at, t.estimated_minutes || null,
+          t.reminder_minutes ?? null, t.repeat_minutes ?? null, t.recurrence || 'NONE', t.tags || '',
+          t.notes || '', t.completed_at || null, t.created_at || nowISO(), t.updated_at || nowISO()
+        );
+      } catch (err) {
+        console.warn('Failed restoring task', t.id, err.message);
+      }
+    }
+
+    if (Array.isArray(data.subtasks)) {
+      const insertSubtask = db.prepare(`INSERT OR IGNORE INTO subtasks 
+        (id,task_id,title,is_completed,assignee_id,due_at,sort_order,completed_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`);
+      for (const st of data.subtasks) {
+        try {
+          insertSubtask.run(
+            st.id, st.task_id, st.title, st.is_completed ? 1 : 0, st.assignee_id || null,
+            st.due_at || null, st.sort_order || 0, st.completed_at || null, st.created_at || nowISO(), st.updated_at || nowISO()
+          );
+        } catch {}
+      }
+    }
+    console.log(`Restored ${data.tasks.length} tasks and ${data.subtasks?.length || 0} subtasks from snapshot.`);
+  } catch (e) {
+    console.warn('restoreTasksFromSnapshot error:', e.message);
+  }
 }
 
 export function seedIfEmpty(){
@@ -210,4 +283,6 @@ export function seedIfEmpty(){
   }
 
   syncTeamUsers();
+  restoreTasksFromSnapshot();
 }
+

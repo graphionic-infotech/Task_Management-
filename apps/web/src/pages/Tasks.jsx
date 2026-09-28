@@ -35,8 +35,9 @@ export default function Tasks({ meta, onOpen, refreshKey, user }) {
     if (pri && pri !== f.priority) setF(s => ({ ...s, priority: pri }));
   }, [searchParams]);
 
-  const load = async () => {
-    setLoading(true); setErr('');
+  const load = async (silent = false) => {
+    if (!silent && rows.length === 0) setLoading(true);
+    setErr('');
     const p = new URLSearchParams();
     if (view !== 'all') p.set('view', view);
     if (f.assignee) p.set('assignee', f.assignee);
@@ -45,20 +46,40 @@ export default function Tasks({ meta, onOpen, refreshKey, user }) {
     if (f.search) p.set('search', f.search);
     try {
       const data = await api('/api/tasks?' + p.toString());
-      setRows(data);
-    } catch (e) { setErr(e.message); }
-    finally { setLoading(false); }
+      setRows(data || []);
+    } catch (e) {
+      if (rows.length === 0) setErr(e.message || 'Failed to load tasks');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  useEffect(() => { load(); setSel([]); }, [view, refreshKey]);
-  useEffect(() => { const t = setTimeout(load, 320); return () => clearTimeout(t); }, [f.search, f.assignee, f.status, f.priority]);
+  useEffect(() => {
+    load(false);
+    setSel([]);
+  }, [view]);
+
+  useEffect(() => {
+    if (refreshKey > 0) {
+      load(true);
+    }
+  }, [refreshKey]);
+
+  useEffect(() => {
+    const t = setTimeout(() => load(true), 320);
+    return () => clearTimeout(t);
+  }, [f.search, f.assignee, f.status, f.priority]);
 
   const toggle = (id) => setSel(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
   const bulk = async (action, payload) => {
     await api('/api/tasks/bulk', { method: 'POST', body: { ids: sel, action, payload } });
-    setSel([]); load();
+    setSel([]);
+    load(true);
   };
-  const setStatus = async (id, status_id) => { await api('/api/tasks/' + id, { method: 'PATCH', body: { status_id } }); load(); };
+  const setStatus = async (id, status_id) => {
+    await api('/api/tasks/' + id, { method: 'PATCH', body: { status_id } });
+    load(true);
+  };
 
   const toggleExpandSubtasks = async (taskId, e) => {
     e?.stopPropagation();
@@ -163,9 +184,9 @@ export default function Tasks({ meta, onOpen, refreshKey, user }) {
         </div>
       )}
 
-      {err && <div className="error-card" style={{marginBottom:14}}><span>⚠</span><span style={{flex:1}}>{err}</span><button className="btn small" onClick={load}>Retry</button></div>}
+      {err && <div className="error-card" style={{marginBottom:14}}><span>⚠</span><span style={{flex:1}}>{err}</span><button className="btn small" onClick={() => load(false)}>Retry</button></div>}
 
-      {loading ? (
+      {loading && rows.length === 0 ? (
         <div className="card" style={{padding:0, overflow:'hidden'}}>
           {[1,2,3,4,5].map(i => (
             <div key={i} className="skeleton-row" style={{borderBottom:'1px solid var(--border-light)'}}>

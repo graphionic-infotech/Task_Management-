@@ -7,7 +7,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { db, initSchema, seedIfEmpty, uid, notify, logActivity, SEED_USERS } from './db.js';
+import { db, initSchema, seedIfEmpty, uid, notify, logActivity, SEED_USERS, saveTasksSnapshot } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isVercel = !!process.env.VERCEL;
@@ -104,22 +104,12 @@ const need = (...roles) => (req, res, next) => {
   next();
 };
 const canSeeTask = (u, t) => {
-  if (u.role === 'ADMIN') return true;
-  if (t.assignee_id === u.id || t.created_by_id === u.id) return true;
-  if (u.role === 'MANAGER') {
-    const m = db.prepare(`SELECT id FROM users WHERE manager_id=?`).all(u.id).map(r => r.id);
-    if (m.includes(t.assignee_id)) return true;
-  }
-  return false;
+  // All authenticated team members in this office workspace can view tasks
+  return !!u;
 };
 const visibleWhere = (u) => {
-  if (u.role === 'ADMIN') return { sql: '1=1', params: [] };
-  if (u.role === 'MANAGER') {
-    const m = db.prepare(`SELECT id FROM users WHERE manager_id=?`).all(u.id).map(r => r.id);
-    const ids = [u.id, ...m];
-    return { sql: `(t.assignee_id IN (${ids.map(() => '?').join(',')}) OR t.created_by_id=?)`, params: [...ids, u.id] };
-  }
-  return { sql: `(t.assignee_id=? OR t.created_by_id=?)`, params: [u.id, u.id] };
+  // All tasks are visible across team views; explicit filter params (?assignee=, ?view=mine) apply when requested
+  return { sql: '1=1', params: [] };
 };
 
 // ---------- helpers ----------
@@ -337,10 +327,10 @@ app.get('/api/tasks', auth, (req, res) => {
   if (q.view === 'today') add(`t.due_at>=? AND t.due_at<=?`, dayStart.toISOString(), dayEnd.toISOString());
   if (q.view === 'overdue') add(`t.due_at<? AND s.is_closed=0`, now);
   if (q.view === 'upcoming') add(`t.due_at>? AND s.is_closed=0`, now);
-  if (q.view === 'completed') add(`s.is_closed=1`, );
-  if (q.view === 'open') add(`s.is_closed=0`);
+  if (q.view === 'completed') add(`COALESCE(s.is_closed,0)=1`);
+  if (q.view === 'open') add(`COALESCE(s.is_closed,0)=0`);
   const sort = q.sort === 'due_asc' || !q.sort ? `t.due_at ASC` : q.sort === 'due_desc' ? `t.due_at DESC` : q.sort === 'priority' ? `CASE t.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END, t.due_at ASC` : `t.updated_at DESC`;
-  const rows = db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE ${conds.join(' AND ')} ORDER BY ${sort} LIMIT 500`).all(...params);
+  const rows = db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} WHERE ${conds.join(' AND ')} ORDER BY ${sort} LIMIT 500`).all(...params);
   res.json({ data: rows });
 });
 
@@ -348,6 +338,9 @@ app.post('/api/tasks', auth, (req, res) => {
   const b = req.body || {};
   if (!b.title || !b.due_at) return res.status(400).json({ error: 'Title and due date/time required' });
   if (b.start_at && b.due_at && b.due_at < b.start_at) return res.status(400).json({ error: 'Due must be after start' });
+
+  const validStatus = b.status_id ? db.prepare('SELECT id FROM task_statuses WHERE id=?').get(b.status_id)?.id : null;
+  const statusId = validStatus || openStatusId();
 
   // Handle assign to ALL team members
   if (b.assignee_id === 'ALL') {
@@ -357,7 +350,7 @@ app.post('/api/tasks', auth, (req, res) => {
       const id = uid();
       db.prepare(`INSERT INTO tasks (id,title,description,type_id,status_id,priority,assignee_id,created_by_id,parent_task_id,contact_id,company_id,project_id,start_at,due_at,estimated_minutes,reminder_minutes,repeat_minutes,recurrence,tags,notes,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, b.title, b.description || '', b.type_id || null, b.status_id || openStatusId(), b.priority || 'MEDIUM',
+        .run(id, b.title, b.description || '', b.type_id || null, statusId, b.priority || 'MEDIUM',
           m.id, req.user.id, b.parent_task_id || null, b.contact_id || null, b.company_id || null, b.project_id || null,
           b.start_at || null, b.due_at, b.estimated_minutes || null, b.reminder_minutes ?? null, b.repeat_minutes ?? null, b.recurrence || 'NONE', b.tags || '', b.notes || '', nowISO(), nowISO());
 
@@ -375,13 +368,14 @@ app.post('/api/tasks', auth, (req, res) => {
       notify(m.id, 'ASSIGNMENT', `New task: ${b.title}`, `Assigned by ${req.user.first_name}. Due ${b.due_at}`, id);
       createdTasks.push(getTask(id));
     }
+    saveTasksSnapshot();
     return res.json({ data: createdTasks[0] || null, allCreated: createdTasks });
   }
 
   const id = uid();
   db.prepare(`INSERT INTO tasks (id,title,description,type_id,status_id,priority,assignee_id,created_by_id,parent_task_id,contact_id,company_id,project_id,start_at,due_at,estimated_minutes,reminder_minutes,repeat_minutes,recurrence,tags,notes,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, b.title, b.description || '', b.type_id || null, b.status_id || openStatusId(), b.priority || 'MEDIUM',
+    .run(id, b.title, b.description || '', b.type_id || null, statusId, b.priority || 'MEDIUM',
       b.assignee_id || req.user.id, req.user.id, b.parent_task_id || null, b.contact_id || null, b.company_id || null, b.project_id || null,
       b.start_at || null, b.due_at, b.estimated_minutes || null, b.reminder_minutes ?? null, b.repeat_minutes ?? null, b.recurrence || 'NONE', b.tags || '', b.notes || '', nowISO(), nowISO());
   
@@ -397,6 +391,7 @@ app.post('/api/tasks', auth, (req, res) => {
 
   logActivity(id, req.user.id, 'CREATED', b.title);
   if (b.assignee_id && b.assignee_id !== req.user.id) notify(b.assignee_id, 'ASSIGNMENT', `New task: ${b.title}`, `Assigned by ${req.user.first_name}. Due ${b.due_at}`, id);
+  saveTasksSnapshot();
   res.json({ data: getTask(id) });
 });
 
@@ -459,6 +454,7 @@ function patchTask(req, res) {
     }
   }
 
+  saveTasksSnapshot();
   res.json({ data: getTask(t.id) });
 }
 app.patch('/api/tasks/:id', auth, patchTask);
@@ -492,6 +488,7 @@ app.post('/api/tasks/:id/complete', auth, (req, res) => {
       logActivity(nextId, req.user.id, 'CREATED', `Recurring from ${t.title}`);
     }
   }
+  saveTasksSnapshot();
   res.json({ data: { task: getTask(t.id), nextId } });
 });
 
@@ -501,6 +498,7 @@ app.post('/api/tasks/:id/reopen', auth, (req, res) => {
   if (!canSeeTask(req.user, t)) return res.status(403).json({ error: 'Forbidden' });
   db.prepare(`UPDATE tasks SET status_id=?, completed_at=NULL, updated_at=?, reminder_sent=0 WHERE id=?`).run(openStatusId(), nowISO(), t.id);
   logActivity(t.id, req.user.id, 'REOPENED', 'Task reopened');
+  saveTasksSnapshot();
   res.json({ data: getTask(t.id) });
 });
 
@@ -521,6 +519,7 @@ app.post('/api/tasks/bulk', auth, (req, res) => {
     logActivity(id, req.user.id, 'EDITED', `Bulk ${action}`);
     n++;
   }
+  saveTasksSnapshot();
   res.json({ data: { updated: n } });
 });
 
@@ -530,6 +529,7 @@ app.delete('/api/tasks/:id', auth, (req, res) => {
   if (!canSeeTask(req.user, t)) return res.status(403).json({ error: 'Forbidden' });
   db.prepare(`UPDATE tasks SET deleted_at=?, updated_at=? WHERE id=?`).run(nowISO(), nowISO(), t.id);
   logActivity(t.id, req.user.id, 'DELETED', t.title);
+  saveTasksSnapshot();
   res.json({ data: true });
 });
 
@@ -629,6 +629,7 @@ app.post('/api/tasks/:id/subtasks', auth, (req, res) => {
     .run(id, t.id, title.trim(), 0, assignee_id || null, due_at || null, maxOrder + 1, nowISO(), nowISO());
   logActivity(t.id, req.user.id, 'SUBTASK_ADDED', title.trim());
   const row = db.prepare(`SELECT s.*, u.first_name assignee_first, u.last_name assignee_last FROM subtasks s LEFT JOIN users u ON u.id=s.assignee_id WHERE s.id=?`).get(id);
+  saveTasksSnapshot();
   res.json({ data: row });
 });
 
@@ -653,6 +654,7 @@ app.patch('/api/subtasks/:id', auth, (req, res) => {
   sets.push('updated_at=?'); params.push(nowISO());
   db.prepare(`UPDATE subtasks SET ${sets.join(', ')} WHERE id=?`).run(...params, st.id);
   const updated = db.prepare(`SELECT s.*, u.first_name assignee_first, u.last_name assignee_last FROM subtasks s LEFT JOIN users u ON u.id=s.assignee_id WHERE s.id=?`).get(st.id);
+  saveTasksSnapshot();
   res.json({ data: updated });
 });
 
@@ -663,6 +665,7 @@ app.delete('/api/subtasks/:id', auth, (req, res) => {
   if (t && !canSeeTask(req.user, t)) return res.status(403).json({ error: 'Forbidden' });
   db.prepare(`DELETE FROM subtasks WHERE id=?`).run(st.id);
   logActivity(st.task_id, req.user.id, 'SUBTASK_DELETED', st.title);
+  saveTasksSnapshot();
   res.json({ data: true });
 });
 
@@ -908,12 +911,12 @@ app.get('/api/dashboard', auth, (req, res) => {
     const dayEnd = new Date(); dayEnd.setHours(23,59,59,999);
     const q = (extra, ...p) => {
       try {
-        return db.prepare(`SELECT COUNT(*) c ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra}`).get(...v.params, ...p)?.c || 0;
+        return db.prepare(`SELECT COUNT(*) c ${TASK_FROM} WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra}`).get(...v.params, ...p)?.c || 0;
       } catch { return 0; }
     };
     const list = (extra, order, ...p) => {
       try {
-        return db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra} ORDER BY ${order} LIMIT 10`).all(...v.params, ...p) || [];
+        return db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} WHERE t.deleted_at IS NULL AND (${v.sql}) AND ${extra} ORDER BY ${order} LIMIT 10`).all(...v.params, ...p) || [];
       } catch { return []; }
     };
     const unread = (() => {
@@ -926,15 +929,15 @@ app.get('/api/dashboard', auth, (req, res) => {
     res.json({ data: {
       counts: {
         dueToday: q(`t.due_at>=? AND t.due_at<=?`, dayStart.toISOString(), dayEnd.toISOString()),
-        overdue: q(`t.due_at<? AND s2.is_closed=0`, now),
-        upcoming: q(`t.due_at>? AND s2.is_closed=0`, now),
+        overdue: q(`t.due_at<? AND COALESCE(s.is_closed,0)=0`, now),
+        upcoming: q(`t.due_at>? AND COALESCE(s.is_closed,0)=0`, now),
         completedToday: q(`t.completed_at>=? AND t.completed_at<=?`, dayStart.toISOString(), dayEnd.toISOString()),
-        high: q(`t.priority IN ('HIGH','URGENT') AND s2.is_closed=0`),
+        high: q(`t.priority IN ('HIGH','URGENT') AND COALESCE(s.is_closed,0)=0`),
         myOpen,
       },
       dueToday: list(`t.due_at>=? AND t.due_at<=?`, 't.due_at ASC', dayStart.toISOString(), dayEnd.toISOString()),
-      overdue: list(`t.due_at<? AND s2.is_closed=0`, 't.due_at ASC', now),
-      upcoming: list(`t.due_at>? AND s2.is_closed=0`, 't.due_at ASC', now),
+      overdue: list(`t.due_at<? AND COALESCE(s.is_closed,0)=0`, 't.due_at ASC', now),
+      upcoming: list(`t.due_at>? AND COALESCE(s.is_closed,0)=0`, 't.due_at ASC', now),
       unread,
     }});
   } catch (err) {
@@ -962,9 +965,9 @@ app.get('/api/search', auth, (req, res) => {
     kw = kw.replace(forMatch[0], '').trim();
   }
   let tasks = [];
-  if (kw) tasks = db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) ${extra} AND (t.title LIKE ? OR t.description LIKE ? OR t.tags LIKE ?) ORDER BY t.due_at LIMIT 30`)
+  if (kw) tasks = db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} WHERE t.deleted_at IS NULL AND (${v.sql}) ${extra} AND (t.title LIKE ? OR t.description LIKE ? OR t.tags LIKE ?) ORDER BY t.due_at LIMIT 30`)
     .all(...v.params, ...xp, `%${kw}%`, `%${kw}%`, `%${kw}%`);
-  else if (extra) tasks = db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} JOIN task_statuses s2 ON s2.id=t.status_id WHERE t.deleted_at IS NULL AND (${v.sql}) ${extra} ORDER BY t.due_at LIMIT 30`).all(...v.params, ...xp);
+  else if (extra) tasks = db.prepare(`SELECT ${TASK_JOIN} ${TASK_FROM} WHERE t.deleted_at IS NULL AND (${v.sql}) ${extra} ORDER BY t.due_at LIMIT 30`).all(...v.params, ...xp);
   const contacts = db.prepare(`SELECT * FROM contacts WHERE first_name LIKE ? OR last_name LIKE ? OR email LIKE ? LIMIT 10`).all(`%${raw}%`,`%${raw}%`,`%${raw}%`);
   const companies = db.prepare(`SELECT * FROM companies WHERE name LIKE ? LIMIT 10`).all(`%${raw}%`);
   const projects = db.prepare(`SELECT * FROM projects WHERE name LIKE ? LIMIT 10`).all(`%${raw}%`);
@@ -1006,6 +1009,23 @@ app.post('/api/settings/types', auth, need('ADMIN'), (req, res) => {
 
 // ---------- system ----------
 app.get('/api/system/health', (req, res) => res.json({ data: { ok: true, time: nowISO() } }));
+app.get('/api/system/status', (req, res) => {
+  try {
+    const taskCount = db.prepare('SELECT count(*) c FROM tasks WHERE deleted_at IS NULL').get()?.c || 0;
+    const userCount = db.prepare('SELECT count(*) c FROM users WHERE deleted_at IS NULL').get()?.c || 0;
+    res.json({
+      data: {
+        ok: true,
+        isVercel,
+        tasks: taskCount,
+        users: userCount,
+        time: nowISO()
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.get('/api/system/backup', auth, need('ADMIN'), (req, res) => {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dest = path.join(DATA_DIR, 'backups', `grapteam-${stamp}.db`);

@@ -92,13 +92,20 @@ export default function TaskDetail({ id, meta, onClose, onChanged }) {
 
   if (err && !t) {
     return (
-      <div className="drawer">
+      <div className="drawer" role="dialog" aria-modal="true">
         <div className="drawer-head">
-          <span style={{fontWeight:700}}>Error</span>
+          <span style={{fontWeight:700}}>Task Not Found</span>
           <button className="btn small ghost" onClick={onClose}>✕ Close</button>
         </div>
         <div className="drawer-body">
-          <div className="error-card"><span>⚠</span><span style={{flex:1}}>{err}</span><button className="btn small" onClick={load}>Retry</button></div>
+          <div className="error-card" style={{marginBottom:16}}>
+            <span>⚠</span>
+            <span style={{flex:1}}>{err.toLowerCase().includes('not found') ? 'This task could not be found. It may have been deleted or archived.' : err}</span>
+          </div>
+          <p style={{color:'var(--text-secondary)', fontSize:13, lineHeight:1.5, marginBottom:16}}>
+            Please return to your task board or refresh to see the latest office tasks.
+          </p>
+          <button className="btn primary small" onClick={onClose}>Back to Tasks</button>
         </div>
       </div>
     );
