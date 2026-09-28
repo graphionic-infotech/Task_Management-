@@ -17,8 +17,9 @@
   "scripts": {
     "dev": "bunx tauri dev",
     "dev:vite": "vite",
-    "build": "bunx tauri build",
+    "build": "tsc && vite build",
     "build:vite": "tsc && vite build",
+    "desktop:web:build": "tsc && vite build",
     "lint": "../../node_modules/.bin/eslint . --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "test": "vitest run",
