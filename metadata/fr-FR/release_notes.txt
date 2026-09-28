@@ -1,0 +1,5 @@
+- Les écrans de tâches sont plus clairs et le regroupement Focus est plus rapide.
+- Les Rappels Apple peuvent être importés automatiquement sans tâches en double.
+- Les changements iCloud arrivent par push silencieux et la sync bloquée finit plus tôt.
+- Les widgets suivent le format de date et les exceptions de calendrier sont fiables.
+- Recherche avec @contexte, #tag et %personne ; sync et pièces jointes sont renforcées.

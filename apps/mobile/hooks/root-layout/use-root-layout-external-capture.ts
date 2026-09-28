@@ -1,0 +1,586 @@
+import { useCallback, useEffect, useRef } from 'react';
+import * as FileSystem from 'expo-file-system';
+import { Platform } from 'react-native';
+
+import { generateUUID, useTaskStore, validateAttachmentForUpload, type Attachment, type Task } from '@mindwtr/core';
+
+import type { ToastOptions } from '@/contexts/toast-context';
+import { logError, logInfo, logWarn } from '@/lib/app-log';
+import { syncAppSearchIndexingWithPreference } from '@/lib/app-search-service';
+import { persistAttachmentLocallyDetailed } from '@/lib/attachment-sync';
+import {
+    classifyIosShareHandoffUrl,
+    logIosShareDiagnostic,
+    type IosSharePayloadType,
+} from '@/lib/share-intent-diagnostics';
+import {
+    isEntityOpenUrl,
+    isOpenFeatureUrl,
+    isShortcutCaptureUrl,
+    normalizeShortcutTags,
+    parseEntityOpenUrl,
+    parseOpenFeatureUrl,
+    parseShortcutCaptureUrl,
+    resolveOpenFeaturePath,
+    type EntityOpenKind,
+    type ShortcutCapturePayload,
+} from '@/lib/capture-deeplink';
+
+type ResolveText = (key: string, fallback: string) => string;
+
+type RouterLike = {
+    canGoBack: () => boolean;
+    push: (...args: any[]) => void;
+    replace: (...args: any[]) => void;
+};
+
+type SharedIntentFile = {
+    fileName?: string | null;
+    mimeType?: string | null;
+    path?: string | null;
+    size?: number | null;
+};
+
+type UseRootLayoutExternalCaptureParams = {
+    dataReady: boolean;
+    disabled?: boolean;
+    hasShareIntent: boolean;
+    incomingUrl: string | null;
+    incomingUrlKey: number;
+    providerReady: boolean;
+    resolveText: ResolveText;
+    resetShareIntent: () => void;
+    router: RouterLike;
+    shareError?: string | null;
+    shareFiles?: SharedIntentFile[] | null;
+    shareSubject?: string | null;
+    shareText?: string | null;
+    shareWebUrl?: string | null;
+    showToast: (options: ToastOptions) => void;
+};
+
+const trimSharedValue = (value: string | null | undefined): string => (
+    typeof value === 'string' ? value.trim() : ''
+);
+
+const inferSharePayloadType = ({
+    shareFiles,
+    shareText,
+    shareWebUrl,
+}: {
+    shareFiles?: SharedIntentFile[] | null;
+    shareText?: string | null;
+    shareWebUrl?: string | null;
+}): IosSharePayloadType => {
+    if ((shareFiles ?? []).some((file) => typeof file?.path === 'string' && file.path.trim().length > 0)) {
+        const files = shareFiles ?? [];
+        return files.length > 0 && files.every((file) => (
+            typeof file?.mimeType === 'string'
+            && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('video/'))
+        )) ? 'media' : 'file';
+    }
+    if (trimSharedValue(shareWebUrl)) return 'weburl';
+    if (trimSharedValue(shareText)) return 'text';
+    return 'unknown';
+};
+
+const SHARE_INTENT_MAX_FILES = 6;
+
+const stripFileExtension = (value: string): string => value.replace(/\.[A-Za-z0-9]{1,8}$/, '');
+
+type ShareIntentFileCaptureResult = {
+    params: Record<string, string> | null;
+    candidateCount: number;
+    attachedCount: number;
+};
+
+// Shared files (PDFs, images, audio, ...) become copied attachments on the
+// capture draft, mirroring the in-app attach flow: the share-extension file
+// lives in a temporary container, so the bytes must be re-homed into the
+// managed attachments dir before the capture sheet ever sees them.
+async function buildShareIntentFileCaptureParams({
+    files,
+    shareSubject,
+    shareText,
+}: {
+    files?: SharedIntentFile[] | null;
+    shareSubject?: string | null;
+    shareText?: string | null;
+}): Promise<ShareIntentFileCaptureResult> {
+    const candidates = (files ?? [])
+        .filter((file): file is SharedIntentFile & { path: string } => (
+            typeof file?.path === 'string' && file.path.trim().length > 0
+        ))
+        .slice(0, SHARE_INTENT_MAX_FILES);
+    if (candidates.length === 0) return { params: null, candidateCount: 0, attachedCount: 0 };
+
+    const attachments: Attachment[] = [];
+    for (const file of candidates) {
+        const now = new Date().toISOString();
+        const sourceUri = file.path.startsWith('/') ? `file://${file.path}` : file.path;
+        const attachment: Attachment = {
+            id: generateUUID(),
+            kind: 'file',
+            title: trimSharedValue(file.fileName) || 'Shared file',
+            uri: sourceUri,
+            mimeType: trimSharedValue(file.mimeType) || undefined,
+            size: typeof file.size === 'number' && Number.isFinite(file.size) ? file.size : undefined,
+            createdAt: now,
+            updatedAt: now,
+            localStatus: 'available',
+        };
+        try {
+            // Some providers omit the size; 0 still runs the mime blocklist,
+            // and the post-copy check below enforces the size cap.
+            const validation = await validateAttachmentForUpload(attachment, attachment.size ?? 0);
+            if (!validation.valid) {
+                void logWarn('Skipped shared file failing attachment validation', {
+                    scope: 'share-intent',
+                    extra: { error: validation.error ?? 'unknown', size: String(attachment.size ?? 'unknown') },
+                });
+                continue;
+            }
+            const persisted = await persistAttachmentLocallyDetailed(attachment);
+            if (persisted.status !== 'copied' && persisted.status !== 'already-local') {
+                // A share-container path goes stale as soon as the intent is
+                // consumed, so a failed copy means the file is lost to us.
+                void logWarn('Failed to copy shared file into attachments', {
+                    scope: 'share-intent',
+                    extra: { status: persisted.status },
+                });
+                continue;
+            }
+            const cached = persisted.attachment;
+            if (typeof attachment.size !== 'number' && typeof cached.size === 'number') {
+                // The copy revealed the real size of a sizeless share; drop the
+                // bytes again if they exceed the attachment cap.
+                const sizeValidation = await validateAttachmentForUpload(cached, cached.size);
+                if (!sizeValidation.valid) {
+                    void FileSystem.deleteAsync(cached.uri, { idempotent: true }).catch(() => undefined);
+                    void logWarn('Skipped shared file failing attachment validation', {
+                        scope: 'share-intent',
+                        extra: { error: sizeValidation.error ?? 'unknown', size: String(cached.size) },
+                    });
+                    continue;
+                }
+            }
+            attachments.push(cached);
+        } catch (error) {
+            void logError(error, { scope: 'share-intent', extra: { step: 'copy-shared-file' } });
+        }
+    }
+    if (attachments.length === 0) {
+        return { params: null, candidateCount: candidates.length, attachedCount: 0 };
+    }
+
+    const subject = trimSharedValue(shareSubject);
+    const text = trimSharedValue(shareText);
+    const title = subject || text || stripFileExtension(attachments[0].title);
+    const props: Partial<Task> = { attachments };
+    // Only a real email subject earns a description; plain file shares keep
+    // their long-standing shape (title only, no body).
+    if (subject && text) {
+        props.description = text;
+    }
+    return {
+        params: {
+            initialValue: encodeURIComponent(title),
+            initialProps: encodeURIComponent(JSON.stringify(props satisfies Partial<Task>)),
+        },
+        candidateCount: candidates.length,
+        attachedCount: attachments.length,
+    };
+}
+
+function buildShareIntentCaptureParams({
+    shareSubject,
+    shareText,
+    shareWebUrl,
+}: {
+    shareSubject?: string | null;
+    shareText?: string | null;
+    shareWebUrl?: string | null;
+}): Record<string, string> | null {
+    const subject = trimSharedValue(shareSubject);
+    if (subject) {
+        // Email shares (FairEmail etc.) carry a real subject: it becomes the
+        // title, and the body/URL move to the description instead of being
+        // dumped into the title together.
+        const text = trimSharedValue(shareText);
+        const url = trimSharedValue(shareWebUrl);
+        const descriptionLines = [text, url && url !== text ? url : null]
+            .filter((line): line is string => Boolean(line));
+
+        const params: Record<string, string> = {
+            initialValue: encodeURIComponent(subject),
+        };
+        if (descriptionLines.length > 0) {
+            params.initialProps = encodeURIComponent(JSON.stringify({
+                description: descriptionLines.join('\n'),
+            } satisfies Partial<Task>));
+        }
+        return params;
+    }
+
+    const title = trimSharedValue(shareText) || trimSharedValue(shareWebUrl);
+    if (!title) return null;
+
+    const params: Record<string, string> = {
+        initialValue: encodeURIComponent(title),
+    };
+    const url = trimSharedValue(shareWebUrl);
+    if (url && url !== title) {
+        params.initialProps = encodeURIComponent(JSON.stringify({
+            description: url,
+        } satisfies Partial<Task>));
+    }
+
+    return params;
+}
+
+// Deep links are untrusted input (#1017): resolve an entity-open URL to a
+// navigation target only when the id still exists in the store, and fall
+// back to the default view otherwise. Areas have no dedicated detail screen,
+// so an area link opens Projects — the closest existing view that lists them.
+function resolveEntityOpenPath(kind: EntityOpenKind, id: string): { pathname: string; params?: Record<string, string> } | null {
+    const state = useTaskStore.getState();
+    if (kind === 'task') {
+        const task = state._tasksById?.get(id);
+        if (!task || task.deletedAt) return null;
+        state.setHighlightTask(id);
+        return { pathname: '/focus', params: { taskId: id, openToken: `deeplink:${Date.now()}`, taskTab: 'view' } };
+    }
+    if (kind === 'project') {
+        const project = state._projectsById?.get(id);
+        if (!project || project.deletedAt) return null;
+        return { pathname: '/projects-screen', params: { projectId: id } };
+    }
+    const area = state._areasById?.get(id);
+    if (!area || area.deletedAt) return null;
+    return { pathname: '/projects-screen' };
+}
+
+export function useRootLayoutExternalCapture({
+    dataReady,
+    disabled = false,
+    hasShareIntent,
+    incomingUrl,
+    incomingUrlKey,
+    providerReady,
+    resolveText,
+    resetShareIntent,
+    router,
+    shareError,
+    shareFiles,
+    shareSubject,
+    shareText,
+    shareWebUrl,
+    showToast,
+}: UseRootLayoutExternalCaptureParams) {
+    // Keyed per delivery, not per URL string: an Action Button shortcut sends
+    // the same capture link every time, and each press must open the sheet.
+    const lastHandledKey = useRef<number>(0);
+    // The async file-copy branch outlives a render; a dep-identity change
+    // mid-copy (language load swaps resolveText, for instance) must not start
+    // a second copy of the same share.
+    const shareHandlingRef = useRef(false);
+    const lastProviderReadyRef = useRef<boolean | null>(null);
+    const lastObservedShareUrlKeyRef = useRef<number | null>(null);
+    const shareDiagnosticActiveRef = useRef(false);
+    const shareDiagnosticStagesRef = useRef(new Set<string>());
+
+    useEffect(() => {
+        if (Platform.OS !== 'ios' || lastProviderReadyRef.current === providerReady) return;
+        lastProviderReadyRef.current = providerReady;
+        logIosShareDiagnostic({
+            stage: 'provider-status',
+            providerReady,
+            dataReady,
+            disabled,
+        });
+    }, [dataReady, disabled, providerReady]);
+
+    useEffect(() => {
+        if (Platform.OS !== 'ios') return;
+        const type = classifyIosShareHandoffUrl(incomingUrl);
+        if (!type || lastObservedShareUrlKeyRef.current === incomingUrlKey) return;
+        lastObservedShareUrlKeyRef.current = incomingUrlKey;
+        logIosShareDiagnostic({
+            stage: 'host-url-received',
+            type,
+            providerReady,
+            dataReady,
+            disabled,
+        });
+    }, [dataReady, disabled, incomingUrl, incomingUrlKey, providerReady]);
+
+    useEffect(() => {
+        if (Platform.OS !== 'ios') return;
+        if (!hasShareIntent) {
+            if (!shareHandlingRef.current) {
+                shareDiagnosticActiveRef.current = false;
+                shareDiagnosticStagesRef.current.clear();
+            }
+            return;
+        }
+
+        if (!shareDiagnosticActiveRef.current) {
+            shareDiagnosticActiveRef.current = true;
+            shareDiagnosticStagesRef.current.clear();
+        }
+        const stages = shareDiagnosticStagesRef.current;
+        const type = inferSharePayloadType({ shareFiles, shareText, shareWebUrl });
+        if (!stages.has('payload-seen')) {
+            stages.add('payload-seen');
+            logIosShareDiagnostic({
+                stage: 'payload-seen',
+                type,
+                providerReady,
+                dataReady,
+                disabled,
+                fileCount: shareFiles?.length ?? 0,
+            });
+        }
+        const waitingOutcome = disabled ? 'disabled' : (!dataReady ? 'data-not-ready' : null);
+        if (waitingOutcome && !stages.has(`waiting:${waitingOutcome}`)) {
+            stages.add(`waiting:${waitingOutcome}`);
+            logIosShareDiagnostic({
+                stage: 'waiting',
+                outcome: waitingOutcome,
+                providerReady,
+            });
+        }
+    }, [dataReady, disabled, hasShareIntent, providerReady, shareFiles, shareText, shareWebUrl]);
+
+    // Arms the AppSearch index (#1017) once per app start if the device-local
+    // preference is on. This hook already owns every other OS-level entry
+    // point (share intents, deep links) and runs unconditionally on mount, so
+    // it is the natural place to also arm the search-index subscription —
+    // there is no dedicated root-layout-startup file in this task's scope.
+    // No-op (and no AsyncStorage read) when unsupported or off.
+    useEffect(() => {
+        if (disabled) return;
+        void syncAppSearchIndexingWithPreference();
+    }, [disabled]);
+
+    const openCaptureConfirmation = useCallback((payload: ShortcutCapturePayload) => {
+        const tags = normalizeShortcutTags(payload.tags);
+        const initialProps: Partial<Task> = {
+            ...(payload.note ? { description: payload.note } : {}),
+            ...(tags.length > 0 ? { tags } : {}),
+        };
+        const params: Record<string, string> = {
+            initialValue: encodeURIComponent(payload.title),
+        };
+        if (Object.keys(initialProps).length > 0) {
+            params.initialProps = encodeURIComponent(JSON.stringify(initialProps));
+        }
+        if (payload.project) {
+            params.project = encodeURIComponent(payload.project);
+        }
+
+        if (router.canGoBack()) {
+            router.push({
+                pathname: '/capture-modal',
+                params,
+            });
+        } else {
+            router.replace({
+                pathname: '/capture-modal',
+                params,
+            });
+        }
+    }, [router]);
+
+    // The native module reports failures (unreadable URI, resolver errors) on a
+    // separate error channel that used to vanish silently: the app just opened
+    // with no sheet and no clue (#1117). Surface it so a broken share is at
+    // least visible and diagnosable from the log.
+    const lastShareErrorRef = useRef<string | null>(null);
+    const lastShareDiagnosticErrorRef = useRef<{ error: string; shareUrlKey: number | null } | null>(null);
+    useEffect(() => {
+        if (!shareError) {
+            lastShareDiagnosticErrorRef.current = null;
+            return;
+        }
+        if (disabled) return;
+        if (Platform.OS === 'ios') {
+            const shareUrlKey = classifyIosShareHandoffUrl(incomingUrl) ? incomingUrlKey : null;
+            const previous = lastShareDiagnosticErrorRef.current;
+            if (!previous || previous.error !== shareError || (shareUrlKey !== null && previous.shareUrlKey !== shareUrlKey)) {
+                lastShareDiagnosticErrorRef.current = { error: shareError, shareUrlKey };
+                logIosShareDiagnostic({
+                    stage: 'native-error',
+                    outcome: 'present',
+                    providerReady,
+                    dataReady,
+                    disabled,
+                });
+            }
+        }
+        if (lastShareErrorRef.current === shareError) return;
+        lastShareErrorRef.current = shareError;
+        if (Platform.OS !== 'ios') {
+            void logError(new Error(`Share intent failed: ${shareError}`), { scope: 'share-intent' });
+        }
+        showToast({
+            title: resolveText('share.unavailable', 'Share unavailable'),
+            message: resolveText('share.readFailed', 'Mindwtr could not read text, a URL, or a file from the shared item.'),
+            tone: 'warning',
+        });
+    }, [dataReady, disabled, incomingUrl, incomingUrlKey, providerReady, resolveText, shareError, showToast]);
+
+    useEffect(() => {
+        if (disabled) return;
+        if (!hasShareIntent) return;
+        // Cold start: navigating before the root navigator and store are up
+        // swallows the replace and the share dies silently (#1117). The provider
+        // holds the intent, so waiting for dataReady just re-runs this effect —
+        // the same gate the deep-link effect below has always used.
+        if (!dataReady) return;
+        if (shareHandlingRef.current) return;
+        shareHandlingRef.current = true;
+        const payloadType = inferSharePayloadType({ shareFiles, shareText, shareWebUrl });
+        if (!shareDiagnosticStagesRef.current.has('processing-started')) {
+            shareDiagnosticStagesRef.current.add('processing-started');
+            logIosShareDiagnostic({
+                stage: 'processing-started',
+                type: payloadType,
+                fileCount: shareFiles?.length ?? 0,
+            });
+        }
+        const finish = (params: Record<string, string> | null) => {
+            if (params) {
+                logIosShareDiagnostic({ stage: 'navigation-requested', type: payloadType });
+                router.replace({
+                    pathname: '/capture-modal',
+                    params: { ...params, ...(Platform.OS === 'ios' ? { origin: 'share' } : {}) },
+                });
+                logIosShareDiagnostic({ stage: 'navigation-returned', type: payloadType });
+            } else {
+                logIosShareDiagnostic({ stage: 'payload-missing', type: payloadType });
+                if (Platform.OS !== 'ios') {
+                    void logError(new Error('Share intent payload missing text and files'), { scope: 'share-intent' });
+                }
+                showToast({
+                    title: resolveText('share.unavailable', 'Share unavailable'),
+                    message: resolveText('share.readFailed', 'Mindwtr could not read text, a URL, or a file from the shared item.'),
+                    tone: 'warning',
+                });
+            }
+        };
+        const hasSharedFiles = (shareFiles ?? []).some((file) => typeof file?.path === 'string' && file.path.trim().length > 0);
+        if (!hasSharedFiles) {
+            // Text/URL shares stay synchronous; only file shares need the
+            // async copy into the managed attachments dir.
+            finish(buildShareIntentCaptureParams({ shareSubject, shareText, shareWebUrl }));
+            logIosShareDiagnostic({ stage: 'reset-requested' });
+            resetShareIntent();
+            logIosShareDiagnostic({ stage: 'reset-returned' });
+            shareHandlingRef.current = false;
+            return;
+        }
+        void buildShareIntentFileCaptureParams({ files: shareFiles, shareSubject, shareText })
+            .then((result) => {
+                const skippedCount = result.candidateCount - result.attachedCount;
+                logIosShareDiagnostic({
+                    stage: 'files-prepared',
+                    candidateCount: result.candidateCount,
+                    attachedCount: result.attachedCount,
+                    skippedCount,
+                });
+                if (skippedCount > 0) {
+                    showToast({
+                        title: resolveText('common.notice', 'Notice'),
+                        message: resolveText(
+                            'share.filesSkipped',
+                            '{{count}} shared file(s) could not be attached (too large, blocked file type, or unreadable).',
+                        ).replace('{{count}}', String(skippedCount)),
+                        tone: 'warning',
+                    });
+                }
+                const params = result.params ?? buildShareIntentCaptureParams({ shareSubject, shareText, shareWebUrl });
+                if (params) {
+                    logIosShareDiagnostic({ stage: 'navigation-requested', type: payloadType });
+                    router.replace({
+                        pathname: '/capture-modal',
+                        params: { ...params, ...(Platform.OS === 'ios' ? { origin: 'share' } : {}) },
+                    });
+                    logIosShareDiagnostic({ stage: 'navigation-returned', type: payloadType });
+                } else if (skippedCount === 0) {
+                    // Nothing readable at all; when files were skipped the
+                    // toast above already explains why nothing arrived.
+                    finish(null);
+                }
+            })
+            .finally(() => {
+                logIosShareDiagnostic({ stage: 'reset-requested' });
+                resetShareIntent();
+                logIosShareDiagnostic({ stage: 'reset-returned' });
+                shareHandlingRef.current = false;
+            });
+    }, [dataReady, disabled, hasShareIntent, resolveText, resetShareIntent, router, shareFiles, shareSubject, shareText, shareWebUrl, showToast]);
+
+    useEffect(() => {
+        if (!dataReady || disabled) return;
+        if (!incomingUrl) return;
+        if (lastHandledKey.current === incomingUrlKey) return;
+
+        const featurePayload = parseOpenFeatureUrl(incomingUrl);
+        if (featurePayload) {
+            lastHandledKey.current = incomingUrlKey;
+            router.replace(resolveOpenFeaturePath(featurePayload.feature));
+            return;
+        }
+        if (isOpenFeatureUrl(incomingUrl)) {
+            lastHandledKey.current = incomingUrlKey;
+            router.replace('/inbox');
+            return;
+        }
+
+        const entityPayload = parseEntityOpenUrl(incomingUrl);
+        if (entityPayload) {
+            lastHandledKey.current = incomingUrlKey;
+            const target = resolveEntityOpenPath(entityPayload.kind, entityPayload.id);
+            router.replace(target ?? '/inbox');
+            return;
+        }
+        if (isEntityOpenUrl(incomingUrl)) {
+            lastHandledKey.current = incomingUrlKey;
+            router.replace('/inbox');
+            return;
+        }
+
+        const payload = parseShortcutCaptureUrl(incomingUrl);
+        if (!payload) {
+            if (!isShortcutCaptureUrl(incomingUrl)) return;
+            lastHandledKey.current = incomingUrlKey;
+            void logWarn('Invalid shortcut capture URL', {
+                scope: 'shortcuts',
+                extra: { releaseCheck: 'v1.3.1/shortcut-failure-privacy', stage: 'invalid-payload' },
+            });
+            showToast({
+                title: resolveText('shortcuts.captureUnavailable', 'Capture shortcut unavailable'),
+                message: resolveText('shortcuts.missingTitle', 'Mindwtr could not read a task title from that shortcut link.'),
+                tone: 'warning',
+            });
+            return;
+        }
+
+        lastHandledKey.current = incomingUrlKey;
+        try {
+            openCaptureConfirmation(payload);
+            void logInfo('Shortcut capture confirmation requested', {
+                scope: 'shortcuts',
+                extra: { releaseCheck: 'v1.3.0/shortcut-capture-single-owner' },
+            });
+        } catch {
+            lastHandledKey.current = 0;
+            // Router errors can echo the private capture parameters too.
+            void logWarn('Shortcut capture confirmation failed', {
+                scope: 'shortcuts',
+                extra: { releaseCheck: 'v1.3.1/shortcut-failure-privacy', stage: 'navigation' },
+            });
+        }
+    }, [dataReady, disabled, incomingUrl, incomingUrlKey, resolveText, openCaptureConfirmation, router, showToast]);
+}

@@ -1,0 +1,17 @@
+{
+  "name": "Graphionic Workspace",
+  "short_name": "Graphionic",
+  "description": "Enterprise productivity and workflow management system by Graphionic.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#090d16",
+  "theme_color": "#0ea5e9",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

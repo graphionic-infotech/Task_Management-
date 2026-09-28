@@ -1,0 +1,5 @@
+- Las pantallas de tareas son más claras y Enfoque agrupa más rápido.
+- Los Recordatorios de Apple pueden importarse automáticamente sin tareas duplicadas.
+- Los cambios de iCloud llegan por push silencioso y la sincronización bloqueada termina antes.
+- Los widgets siguen tu formato de fecha y mejoran las excepciones del calendario.
+- Busca con @contexto, #etiqueta y %persona; mejoran sync y adjuntos.

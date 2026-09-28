@@ -1,0 +1,5 @@
+- Task screens are cleaner, and Focus grouping is faster.
+- Apple Reminders can import automatically without creating duplicate tasks.
+- iCloud changes arrive by silent push, and stalled background sync ends sooner.
+- Widgets follow your date format, and recurring calendar exceptions work reliably.
+- Search accepts @context, #tag, and %person shorthand, with stronger sync and attachment handling.

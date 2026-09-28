@@ -1,56 +1,121 @@
-# deps
+# Dependencies
 node_modules/
 .pnp
 .pnp.js
+.bun-install/
+.bun-tmp/
 
-# builds
+# Build outputs
 dist/
+dist-electron/
 build/
-out/
-.next/
-.nuxt/
-.output/
+.vite/
+*.tsbuildinfo
 
-# data - local only (never commit real tasks)
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/tasks_store.json
-data/uploads/*
-!data/uploads/.gitkeep
-data/backups/*
-!data/backups/.gitkeep
-
-# env
+# Environment files
 .env
 .env.local
-.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# logs
+# Debug logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-logs
-*.log
+lerna-debug.log*
+crash-logs/
+plans/
 
-# os
-.DS_Store
-Thumbs.db
-
-# ide
-.vscode/
+# IDE
+.vscode/*
+!.vscode/extensions.json
 .idea/
 *.swp
 *.swo
+*~
 
-# vercel
-.vercel
+# OS files
+.DS_Store
+Thumbs.db
 
-# cache
-.cache/
-.parcel-cache/
-.turbo/
-branch_structure.json
-temp_auto_push.bat
-temp_interactive_push.bat
+# Testing
+coverage/
+.vitest/
+test-results/
+.perf/
+
+# Mobile (Expo)
+apps/mobile/.expo/
+apps/mobile/.expo-shared/
+.expo/
+apps/mobile/android/
+apps/mobile/ios/
+apps/mobile/build
+*.apk
+*.aab
+*.ipa
+
+# EAS build artifacts
+apps/mobile/eas-build-*
+.eas/
+
+# Desktop (Electron)
+apps/desktop/dist/
+apps/desktop/dist-electron/
+
+# Desktop (Tauri)
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/.tauri/
+apps/desktop/src-tauri/embedded.provisionprofile
+
+# Lock files (using bun)
+package-lock.json
+!apps/mobile/package-lock.json
+!apps/desktop/package-lock.json
+!packages/core/package-lock.json
+!tools/eas-cli/package-lock.json
+yarn.lock
+
+# AUR build artifacts
+aur/*.pkg.tar.zst
+aur/*.deb
+aur/pkg/
+aur/src/
+
+# Flatpak build cache
+.flatpak-builder/
+build-dir/
+
+# Agent files
+/CONTEXT.md
+AGENT.md
+AGENTS.md
+.codex
+.codegraph/
+.agents
+.serena
+.claude
+.cursor/
+.gemini
+.kiro
+skills-lock.json
+docs/agents
+.impeccable/
+
+# CI artifacts
+scripts/ci/__pycache__/
+
+# Wiki (maintained in separate repo)
+Mindwtr.wiki/
+
+# Local workspace configuration
+.worktrees/
+pnpm-workspace.yaml
+
+# Brainstorming/implementation working files (decisions distilled to docs/adr/)
+docs/superpowers/
+
+# CMake build caches from native module builds; Metro's watcher crashes on their transient dirs
+apps/mobile/modules/*/android/.cxx/
